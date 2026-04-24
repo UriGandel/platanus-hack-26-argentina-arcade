@@ -2,12 +2,13 @@
 // Two ships. One black hole. Bend your shots to destroy your rival.
 
 const W = 800, H = 600, SKEY = 'gduel-v2', MAX_HS = 10;
-const SHIP_Y = [70, 530], SHIP_W = 28, SHIP_H = 20, DASH_SPD = 900, SHIP_VERT = 50;
+const SHIP_Y = [70, 530], SHIP_W = 28, SHIP_H = 20, DASH_SPD = 900, SHIP_VERT = 62;
 const SHIP_SPD = 320, SHIP_VSPD = 200, DASH_DUR = 150, DASH_CD = 1200;
 const AI_DIFF = { EASY: { shootChance: 0.04, dodgeRange: 50, aimBonus: 0.5 }, NORMAL: { shootChance: 0.08, dodgeRange: 70, aimBonus: 1 }, HARD: { shootChance: 0.12, dodgeRange: 90, aimBonus: 1.5 } };
 const BULL_LIFE = 5000, MAX_BULLS = 4, BULL_SPD = 340, BULL_RAD = 5, SHOOT_CD = 280;
 const GRAV_BASE = 900, GRAV_SOFT = 40, WELL_PULSE_SPD = 0.4, WELL_DRIFT = 25;
 const HP_MAX = 3, ROUNDS_TO_WIN = 2;
+const FINAL_TEN_MS = 10000, CLUTCH_MS = 8000;
 const PU_TYPES = ['TRIPLE', 'WARP', 'BOMB', 'REFLECT', 'HOMING'];
 const PU_INTERVAL = 12000, PU_DURATION = 5000, SURGE_INTERVAL = 20000, SURGE_DUR = 5000;
 
@@ -92,7 +93,7 @@ function create() {
 }
 
 function mkShip(idx) {
-  return { x: W / 2, y: SHIP_Y[idx], baseY: SHIP_Y[idx], vx: 0, dashCd: 0, dashEnd: 0, invuln: 0, alive: true, pu: null, puEnd: 0 };
+  return { x: W / 2, y: SHIP_Y[idx], baseY: SHIP_Y[idx], vx: 0, dashCd: 0, dashEnd: 0, invuln: 0, alive: true, pu: null, puEnd: 0, perfectCd: 0 };
 }
 
 function update(time, delta) {
@@ -169,6 +170,12 @@ function updatePlaying(s, time, dt) {
   }
   // Timer update
   g.timer -= dt * 1000;
+  if (!g.finalTen && g.timer <= FINAL_TEN_MS) {
+    g.finalTen = true;
+    g.well.surgeEnd = Math.max(g.well.surgeEnd, time + 1200);
+    addHype(s, 'FINAL TEN', W / 2, H / 2 - 80, C.accent, 1600);
+    playSound(s, 'surge');
+  }
   if (g.timer <= 0 && !g.sudden) {
     g.timer = 0;
     // Tie breaker if time runs out
@@ -219,7 +226,7 @@ function updatePlaying(s, time, dt) {
     const ship = g.ships[i]; if (!ship.alive) continue;
     const isAI = g.ai[i];
     let dir = 0, vdir = 0;
-    if (isAI) { dir = aiGetDir(s, i, time); }
+    if (isAI) { dir = aiGetDir(s, i, time); vdir = aiGetVDir(s, i, time); }
     else {
       const lk = i === 0 ? 'P1_L' : 'P2_L', rk = i === 0 ? 'P1_R' : 'P2_R';
       const uk = i === 0 ? 'P1_U' : 'P2_U', dkk = i === 0 ? 'P1_D' : 'P2_D';
@@ -230,7 +237,8 @@ function updatePlaying(s, time, dt) {
     const dk = i === 0 ? 'P1_2' : 'P2_2';
     if ((isAI ? aiWantDash(s, i, time) : pressed(s, [dk])) && dir !== 0 && time > ship.dashCd) {
       const dashDur = ship.pu === 'WARP' ? DASH_DUR * 1.5 : DASH_DUR;
-      ship.dashEnd = time + dashDur; ship.dashCd = time + (rubberBand(g, i) ? DASH_CD * 0.8 : DASH_CD);
+      const clutchDash = g.timer <= CLUTCH_MS ? 0.88 : 1;
+      ship.dashEnd = time + dashDur; ship.dashCd = time + (rubberBand(g, i) ? DASH_CD * 0.8 : DASH_CD) * clutchDash;
       ship.invuln = time + dashDur + (ship.pu === 'WARP' ? 100 : 0);
       playSound(s, 'dash'); shake(s, 2, 80);
       for (let t = 0; t < 3; t++) { const ax = ship.x - dir * (t + 1) * 18; addParticle(s, ax, ship.y, i === 0 ? C.p1 : C.p2, SHIP_W * 0.4, 180 + t * 60, 0); }
@@ -245,12 +253,30 @@ function updatePlaying(s, time, dt) {
     if (dir !== 0 && !isDashing && Math.random() < 0.4) {
       addParticle(s, ship.x - dir * 10, ship.y + (fwd * 10), i === 0 ? C.p1 : C.p2, 3, 150, 0.5);
     }
+    if (isDashing && time > ship.perfectCd) {
+      for (let bi = g.bullets.length - 1; bi >= 0; bi--) {
+        const bb = g.bullets[bi]; if (bb.owner === i) continue;
+        const dx = bb.x - ship.x, dy = bb.y - ship.y;
+        if (dx * dx + dy * dy < 30 * 30) {
+          g.bullets.splice(bi, 1);
+          ship.perfectCd = time + 700;
+          ship.pu = 'TRIPLE'; ship.puEnd = Math.max(ship.puEnd, time + 1800);
+          addHype(s, 'PERFECT DASH', ship.x, ship.y - 28, C.white, 700);
+          playSound(s, 'orbit');
+          shake(s, 3, 120);
+          break;
+        }
+      }
+    }
     // Rubber banding: smaller hitbox if losing
     // Shoot
     const sk = i === 0 ? 'P1_1' : 'P2_1';
     const wantShoot = isAI ? aiWantShoot(s, i, time) : pressed(s, [sk]);
     if (wantShoot && time > g.shootCd[i] && countBullets(g, i) < MAX_BULLS) {
-      shoot(s, i, time); g.shootCd[i] = time + SHOOT_CD;
+      shoot(s, i, time);
+      const comeback = rubberBand(g, i) ? 0.88 : 1;
+      const clutch = g.timer <= CLUTCH_MS ? 0.9 : 1;
+      g.shootCd[i] = time + SHOOT_CD * comeback * clutch;
     }
     // Power-up timeout
     if (ship.pu && time > ship.puEnd) { ship.pu = null; }
@@ -427,7 +453,8 @@ function countBullets(g, owner) { let c = 0; for (const b of g.bullets) if (b.ow
 
 function shoot(s, idx, time) {
   const g = s.g, ship = g.ships[idx];
-  const vy = idx === 0 ? BULL_SPD : -BULL_SPD;
+  const clutchPow = g.timer <= CLUTCH_MS ? 1.18 : 1;
+  const vy = (idx === 0 ? BULL_SPD : -BULL_SPD) * clutchPow;
   if (ship.pu === 'TRIPLE') {
     for (let a = -0.3; a <= 0.3; a += 0.3) {
       g.bullets.push(mkBullet(ship.x, ship.y, Math.sin(a) * BULL_SPD * 0.5, vy * Math.cos(a), idx, null, BULL_RAD));
@@ -543,6 +570,7 @@ function startRound(s, time) {
   g.nextPU = time + PU_INTERVAL * 0.5; g.nextSurge = time + SURGE_INTERVAL;
   g.nextEvent = time + Phaser.Math.Between(12000, 20000);
   g.nextAst = time + Phaser.Math.Between(3000, 6000);
+  g.finalTen = false;
   g.well.surgeEnd = 0;
   // Round splash
   g.phase = 'roundSplash'; g.roundSplash = time + 1500;
@@ -603,6 +631,40 @@ function aiGetDir(s, idx, time) {
   }
   const d = ai.tgt - ship.x;
   if (Math.abs(d) < 10) return 0;
+  return d > 0 ? 1 : -1;
+}
+function aiGetVDir(s, idx, time) {
+  const g = s.g, ai = g.ai[idx], ship = g.ships[idx];
+  if (!ai) return 0;
+  const diff = ai.diff || AI_DIFF.NORMAL;
+  const fwd = idx === 0 ? 1 : -1;
+  let panic = 0;
+  for (const b of g.bullets) {
+    if (b.owner === idx) continue;
+    const dx = Math.abs(b.x - ship.x);
+    const dy = b.y - ship.y;
+    if (dx < 55 && Math.abs(dy) < 70) {
+      const fromFront = (fwd === 1 && dy > 0) || (fwd === -1 && dy < 0);
+      if (fromFront) panic += 1;
+    }
+  }
+  if (panic > 0) {
+    const back = ship.baseY - fwd * 8;
+    const dBack = back - ship.y;
+    return Math.abs(dBack) < 4 ? 0 : dBack > 0 ? 1 : -1;
+  }
+  if (time > (ai.vCd || 0)) {
+    const enemy = g.ships[1 - idx];
+    const advBase = ship.baseY + fwd * SHIP_VERT * 0.58;
+    const pressure = Phaser.Math.Clamp(Math.abs(enemy.x - ship.x) / 260, 0, 1);
+    const jitter = Phaser.Math.Between(-6, 6) * (2 - diff.aimBonus);
+    ai.vTgt = advBase - fwd * (12 * pressure) + jitter;
+    ai.vCd = time + Phaser.Math.Between(260, 700);
+  }
+  const minY = ship.baseY - 10, maxY = ship.baseY + SHIP_VERT * fwd;
+  const tgtY = Phaser.Math.Clamp(ai.vTgt || ship.baseY, Math.min(minY, maxY), Math.max(minY, maxY));
+  const d = tgtY - ship.y;
+  if (Math.abs(d) < 4) return 0;
   return d > 0 ? 1 : -1;
 }
 function aiWantShoot(s, idx, time) {
@@ -846,6 +908,8 @@ function createUI(s) {
   s.ui.timer = s.add.text(W / 2, H / 2, '', { fontFamily: 'monospace', fontSize: '48px', color: '#ffffff', fontStyle: 'bold', alpha: 0.1 }).setDepth(0).setOrigin(0.5);
   s.ui.round = s.add.text(W / 2, 15, '', { fontFamily: 'monospace', fontSize: '13px', color: '#ffffff', align: 'center' }).setDepth(10).setOrigin(0.5, 0);
   s.ui.wins = s.add.text(W / 2, H - 15, '', { fontFamily: 'monospace', fontSize: '13px', color: '#ffffff', align: 'center' }).setDepth(10).setOrigin(0.5, 1);
+  s.ui.p1State = s.add.text(30, 38, '', { fontFamily: 'monospace', fontSize: '11px', color: '#66ffee' }).setDepth(10);
+  s.ui.p2State = s.add.text(W - 30, H - 36, '', { fontFamily: 'monospace', fontSize: '11px', color: '#ff88bb' }).setDepth(10).setOrigin(1, 1);
   s.ui.hypeLayer = [];
   for (let i = 0; i < 5; i++) {
     const t = s.add.text(0, 0, '', { fontFamily: 'monospace', fontSize: '20px', fontStyle: 'bold', align: 'center' }).setDepth(12).setOrigin(0.5).setVisible(false);
@@ -966,6 +1030,14 @@ function updateHUD(s, time) {
   if (tmS <= 5 && !g.sudden) s.ui.timer.setColor('#ff3388').setAlpha(0.3); else s.ui.timer.setColor('#ffffff').setAlpha(0.1);
   let w = ''; for (let i = 0; i < 2; i++) { w += (i === 0 ? 'P1 ' : '  P2 '); for (let j = 0; j < ROUNDS_TO_WIN; j++)w += j < g.wins[i] ? '●' : '○'; }
   s.ui.wins.setText(w);
+  const s1 = g.ships[0], s2 = g.ships[1];
+  if (s1 && s2) {
+    const p1cd = Math.max(0, (s1.dashCd - time) / 1000), p2cd = Math.max(0, (s2.dashCd - time) / 1000);
+    const p1pu = s1.pu ? `${s1.pu} ${Math.max(0, (s1.puEnd - time) / 1000).toFixed(1)}s` : 'NONE';
+    const p2pu = s2.pu ? `${s2.pu} ${Math.max(0, (s2.puEnd - time) / 1000).toFixed(1)}s` : 'NONE';
+    s.ui.p1State.setText(`DASH ${p1cd <= 0 ? 'READY' : p1cd.toFixed(1) + 's'}  PU ${p1pu}`);
+    s.ui.p2State.setText(`PU ${p2pu}  DASH ${p2cd <= 0 ? 'READY' : p2cd.toFixed(1) + 's'}`);
+  }
   // Hype texts
   const ht = g.hypeTexts;
   for (let i = 0; i < s.ui.hypeLayer.length; i++) {
@@ -993,6 +1065,7 @@ function showTitle(s) {
   // Clear game state visuals
   s.gfx.clear(); s.uigfx.clear();
   s.ui.hp1.setText(''); s.ui.hp2.setText(''); s.ui.round.setText(''); s.ui.wins.setText(''); s.ui.timer.setText('');
+  s.ui.p1State.setText(''); s.ui.p2State.setText('');
   for (const h of s.ui.hypeLayer) h.setVisible(false);
 }
 function updateMenuHL(s) {
@@ -1107,7 +1180,7 @@ function showMatchEnd(s) {
   for (const it of s.ui.gridItems) { it.bg.setVisible(true); it.lb.setVisible(true); }
   g.nameEntry = { letters: [], row: 0, col: 0, cd: 0, ccd: 0 };
   refreshNameVal(s); updateGridHL(s);
-  s.ui.endStatus.setText('');
+  s.ui.endStatus.setText('DASH = REMATCH   START = MENU');
 
   // Update stats display
   const st = g.stats;
@@ -1120,6 +1193,8 @@ MAX COMBO: ${st.maxCombo[0]} | ${st.maxCombo[1]}`;
 }
 function updateMatchEnd(s, time) {
   const g = s.g, ne = g.nameEntry;
+  if (pressed(s, ['START1', 'START2'])) { showTitle(s); return; }
+  if (pressed(s, ['P1_2', 'P2_2'])) { startMatch(s, g.mode || 1, time); return; }
   // Navigate grid
   let ax = 0, ay = 0;
   if (held(s, 'P1_L') || held(s, 'P2_L')) ax = -1;
