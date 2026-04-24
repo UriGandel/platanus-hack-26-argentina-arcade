@@ -4,7 +4,11 @@
 const W = 800, H = 600, SKEY = 'gduel-v2', MAX_HS = 10;
 const SHIP_Y = [70, 530], SHIP_W = 28, SHIP_H = 20, DASH_SPD = 900, SHIP_VERT = 62;
 const SHIP_SPD = 320, SHIP_VSPD = 200, DASH_DUR = 150, DASH_CD = 1200;
-const AI_DIFF = { EASY: { shootChance: 0.04, dodgeRange: 50, aimBonus: 0.5 }, NORMAL: { shootChance: 0.08, dodgeRange: 70, aimBonus: 1 }, HARD: { shootChance: 0.12, dodgeRange: 90, aimBonus: 1.5 } };
+const AI_DIFF = {
+  EASY: { shootChance: 0.04, dodgeRange: 54, aimBonus: 0.55, pressure: 0.35, vSkill: 0.45, miss: 1.1 },
+  NORMAL: { shootChance: 0.08, dodgeRange: 70, aimBonus: 1, pressure: 0.6, vSkill: 0.78, miss: 0.65 },
+  HARD: { shootChance: 0.12, dodgeRange: 92, aimBonus: 1.45, pressure: 0.92, vSkill: 1.05, miss: 0.28 }
+};
 const BULL_LIFE = 5000, MAX_BULLS = 4, BULL_SPD = 340, BULL_RAD = 5, SHOOT_CD = 280;
 const GRAV_BASE = 900, GRAV_SOFT = 40, WELL_PULSE_SPD = 0.4, WELL_DRIFT = 25;
 const HP_MAX = 3, ROUNDS_TO_WIN = 2;
@@ -65,7 +69,10 @@ function create() {
     flash: { dur: 0, color: C.white },// screen flash
     combo: [0, 0], comboTmr: [0, 0],// combo counter per player
     asteroids: [], nextAst: 0,
-    stats: { shots: [0, 0], hits: [0, 0], orbits: [0, 0], maxCombo: [0, 0] },
+    stats: {
+      shots: [0, 0], hits: [0, 0], orbits: [0, 0], maxCombo: [0, 0],
+      nearMiss: [0, 0], perfectDash: [0, 0], streakBonus: [0, 0], runScore: [0, 0], flawlessRounds: [0, 0]
+    },
     shootCd: [0, 0], nextPU: 0, nextSurge: 0, nextEvent: 0,
     sudden: false, lastStand: false,
     timer: 30000,
@@ -75,6 +82,10 @@ function create() {
     nameEntry: { letters: [], row: 0, col: 0, cd: 0, ccd: 0 },
     highScores: [], matchWinner: -1, hypeTexts: [],
     musicOn: false, roundTmr: 0, roundSplash: 0,
+    lastHitAt: 0, hitBurstUntil: 0, hitBurstCount: 0, hitBurstWindowAt: 0,
+    rhythmState: 0, rhythmCd: 0,
+    goalDone: [[false, false, false], [false, false, false]],
+    tipShown: false,
   };
   // Starfield
   for (let i = 0; i < 90; i++)s.g.stars.push({ x: Math.random() * W, y: Math.random() * H, sp: 0.08 + Math.random() * 0.25, sz: Math.random() < 0.3 ? 1.5 : 1, a: 0.15 + Math.random() * 0.5 });
@@ -156,12 +167,45 @@ function simTrajectory(sx, sy, svx, svy, wx, wy, mass, steps, stepDt) {
   return pts;
 }
 
+function getRhythm(g, time) {
+  if (time - g.lastHitAt > 4300) return 1;
+  if (time < g.hitBurstUntil) return -1;
+  return 0;
+}
+function nextEventDelay(g, time) {
+  const r = getRhythm(g, time);
+  if (r > 0) return Phaser.Math.Between(8000, 11500);
+  if (r < 0) return Phaser.Math.Between(12000, 16500);
+  return Phaser.Math.Between(10000, 14500);
+}
+function updateRunGoals(s, p, time) {
+  const g = s.g, st = g.stats, done = g.goalDone[p];
+  if (!done[0] && st.perfectDash[p] >= 2) { done[0] = true; addHype(s, 'GOAL: 2 PERFECT DASH', p === 0 ? 170 : W - 170, p === 0 ? 110 : H - 110, C.accent, 1200); }
+  if (!done[1] && st.orbits[p] >= 1) { done[1] = true; addHype(s, 'GOAL: ORBIT SHOT', p === 0 ? 170 : W - 170, p === 0 ? 132 : H - 132, C.accent, 1200); }
+  if (!done[2] && st.flawlessRounds[p] >= 1) { done[2] = true; addHype(s, 'GOAL: FLAWLESS ROUND', p === 0 ? 170 : W - 170, p === 0 ? 154 : H - 154, C.accent, 1200); }
+}
+
 // ═══════════════ PLAYING ═══════════════
 function updatePlaying(s, time, dt) {
   const g = s.g;
   const wp = wellPos(g, time);
   g.well.x = wp.x; g.well.y = wp.y;
   g.well.mass = wellMass(g, time);
+  const rhythm = getRhythm(g, time);
+  if (rhythm > 0) g.well.mass *= 1.12;
+  else if (rhythm < 0) g.well.mass *= 0.9;
+  if (rhythm !== g.rhythmState && time > g.rhythmCd) {
+    g.rhythmState = rhythm;
+    if (rhythm > 0) addHype(s, 'HEATING UP', W / 2, H / 2 - 95, C.accent, 800);
+    else if (rhythm < 0) addHype(s, 'STABILIZING', W / 2, H / 2 - 95, C.grav, 800);
+    g.rhythmCd = time + 1400;
+  }
+  if (time > g.rhythmCd) {
+    const dtEv = g.nextEvent - time;
+    if (rhythm > 0 && dtEv > 11500) g.nextEvent = time + Phaser.Math.Between(8500, 11000);
+    if (rhythm < 0 && dtEv < 9000) g.nextEvent = time + Phaser.Math.Between(11000, 14500);
+    g.rhythmCd = time + 1200;
+  }
   // Gravity surge
   if (time > g.nextSurge && time > g.well.surgeEnd) {
     g.well.surgeEnd = time + SURGE_DUR; g.nextSurge = time + SURGE_INTERVAL;
@@ -219,7 +263,7 @@ function updatePlaying(s, time, dt) {
     }
     else { addHype(s, '◆ DOUBLE FIRE!', W / 2, H / 2 - 40, C.triple, 2000); for (let i2 = 0; i2 < 2; i2++) { const sh = g.ships[i2]; if (sh.alive && !sh.pu) { sh.pu = 'TRIPLE'; sh.puEnd = time + 3000; } } }
     if (ev !== 'METEOR SHOWER') { playSound(s, 'powerup'); shake(s, 4, 200); }
-    g.nextEvent = time + Phaser.Math.Between(15000, 25000);
+    g.nextEvent = time + nextEventDelay(g, time);
   }
   // Update ships
   for (let i = 0; i < 2; i++) {
@@ -239,7 +283,7 @@ function updatePlaying(s, time, dt) {
       const dashDur = ship.pu === 'WARP' ? DASH_DUR * 1.5 : DASH_DUR;
       const clutchDash = g.timer <= CLUTCH_MS ? 0.88 : 1;
       ship.dashEnd = time + dashDur; ship.dashCd = time + (rubberBand(g, i) ? DASH_CD * 0.8 : DASH_CD) * clutchDash;
-      ship.invuln = time + dashDur + (ship.pu === 'WARP' ? 100 : 0);
+      ship.invuln = time + dashDur * 0.82 + (ship.pu === 'WARP' ? 55 : 0);
       playSound(s, 'dash'); shake(s, 2, 80);
       for (let t = 0; t < 3; t++) { const ax = ship.x - dir * (t + 1) * 18; addParticle(s, ax, ship.y, i === 0 ? C.p1 : C.p2, SHIP_W * 0.4, 180 + t * 60, 0); }
     }
@@ -261,6 +305,8 @@ function updatePlaying(s, time, dt) {
           g.bullets.splice(bi, 1);
           ship.perfectCd = time + 700;
           ship.pu = 'TRIPLE'; ship.puEnd = Math.max(ship.puEnd, time + 1800);
+          g.stats.perfectDash[i]++; g.stats.runScore[i] += 80;
+          updateRunGoals(s, i, time);
           addHype(s, 'PERFECT DASH', ship.x, ship.y - 28, C.white, 700);
           playSound(s, 'orbit');
           shake(s, 3, 120);
@@ -415,6 +461,7 @@ function updatePlaying(s, time, dt) {
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 35 && dist > SHIP_W / 2 + b.r && !b.nearMissed) {
       b.nearMissed = true;
+      g.stats.nearMiss[1 - b.owner]++;
       addHype(s, 'CLOSE CALL', tgt.x, tgt.y - 30, C.accent, 800);
       playSound(s, 'nearmiss');
     }
@@ -486,17 +533,38 @@ function hitShip(s, idx, bullet, time) {
   const ship = g.ships[idx];
   ship.invuln = time + 1000;
   const attacker = 1 - idx;
+  g.lastHitAt = time;
+  if (time - g.hitBurstWindowAt > 2000) { g.hitBurstWindowAt = time; g.hitBurstCount = 0; }
+  g.hitBurstCount++;
+  if (g.hitBurstCount >= 3) {
+    g.hitBurstCount = 0;
+    g.hitBurstUntil = time + 2800;
+    addHype(s, 'INTENSITY DOWN', W / 2, H / 2 - 75, C.grav, 800);
+  }
   // Combo & Hype Text
   addHype(s, '+50', ship.x, ship.y - 20, C.white, 600);
+  g.stats.runScore[attacker] += 50;
   g.stats.hits[attacker]++;
   g.combo[attacker]++; g.comboTmr[attacker] = time + 2000;
   g.stats.maxCombo[attacker] = Math.max(g.stats.maxCombo[attacker], g.combo[attacker]);
   if (g.combo[attacker] >= 2) {
     addHype(s, 'COMBO x' + g.combo[attacker] + '!', ship.x, ship.y - 55, C.accent, 1000);
   }
+  let sb = 0;
+  if (g.combo[attacker] === 2) sb = 100;
+  else if (g.combo[attacker] === 3) sb = 200;
+  else if (g.combo[attacker] >= 4) sb = 350;
+  if (sb > 0) {
+    g.stats.streakBonus[attacker] += sb;
+    g.stats.runScore[attacker] += sb;
+    addHype(s, 'STREAK +' + sb, ship.x, ship.y - 72, C.accent, 900);
+    if (sb >= 350) playSound(s, 'powerup');
+  }
   // Orbit shot?
   if (bullet.orbit > Math.PI) {
     g.stats.orbits[attacker]++;
+    g.stats.runScore[attacker] += 200;
+    updateRunGoals(s, attacker, time);
     addHype(s, 'ORBIT SHOT! +200', ship.x, ship.y - 40, C.accent, 1500);
     playSound(s, 'orbit');
   }
@@ -538,6 +606,7 @@ function endRound(s, time) {
   const g = s.g;
   const winner = g.hp[0] <= 0 ? 1 : 0;
   g.wins[winner]++;
+  if (g.hp[winner] === HP_MAX) { g.stats.flawlessRounds[winner]++; updateRunGoals(s, winner, time); }
   g.roundTmr = time + 2500;
   g.phase = 'roundEnd';
   const wt = winner === 0 ? 'P1' : 'P2';
@@ -567,15 +636,22 @@ function startRound(s, time) {
   // Progressive difficulty scaling per round
   const massScale = 1 + (g.round - 1) * 0.15;
   g.well.mass = GRAV_BASE * massScale;
-  g.nextPU = time + PU_INTERVAL * 0.5; g.nextSurge = time + SURGE_INTERVAL;
-  g.nextEvent = time + Phaser.Math.Between(12000, 20000);
+  g.nextPU = time + Phaser.Math.Between(6000, 8000); g.nextSurge = time + SURGE_INTERVAL;
+  g.nextEvent = time + nextEventDelay(g, time);
   g.nextAst = time + Phaser.Math.Between(3000, 6000);
   g.finalTen = false;
+  g.lastHitAt = time; g.hitBurstUntil = 0; g.hitBurstCount = 0; g.hitBurstWindowAt = time;
+  g.rhythmState = 0; g.rhythmCd = time + 1200;
   g.well.surgeEnd = 0;
   // Round splash
   g.phase = 'roundSplash'; g.roundSplash = time + 1500;
   addHype(s, 'ROUND ' + g.round, W / 2, H / 2 - 20, C.white, 1400);
   addHype(s, 'FIGHT!', W / 2, H / 2 + 25, C.accent, 1200);
+  if (g.round === 1 && g.mode !== 0 && !g.tipShown) {
+    g.tipShown = true;
+    s.time.delayedCall(1200, () => { if (s.g.phase === 'playing' || s.g.phase === 'roundSplash') addHype(s, 'TIP: DASH THROUGH BULLETS', W / 2, H / 2 - 95, C.white, 1300); });
+    s.time.delayedCall(3600, () => { if (s.g.phase === 'playing' || s.g.phase === 'roundSplash') addHype(s, 'POWER-UP INCOMING', W / 2, H / 2 - 72, C.accent, 1100); });
+  }
   speak('ROUND ' + g.round + ', FIGHT');
   playSound(s, 'select');
 }
@@ -584,7 +660,12 @@ function startMatch(s, mode, time) {
   const g = s.g;
   g.mode = mode; g.round = 1; g.wins = [0, 0];
   g.ai = [null, null];
-  g.stats = { shots: [0, 0], hits: [0, 0], orbits: [0, 0], maxCombo: [0, 0] };
+  g.stats = {
+    shots: [0, 0], hits: [0, 0], orbits: [0, 0], maxCombo: [0, 0],
+    nearMiss: [0, 0], perfectDash: [0, 0], streakBonus: [0, 0], runScore: [0, 0], flawlessRounds: [0, 0]
+  };
+  g.goalDone = [[false, false, false], [false, false, false]];
+  g.tipShown = false;
   if (mode === 1) g.ai[1] = { cd: 0, tgt: W / 2, dodgeCd: 0, diff: AI_DIFF[g.aiDiff] };
   g.hypeTexts = []; g.bullets = []; g.powerups = []; g.particles = []; g.bombs = []; g.asteroids = [];
   startRound(s, time || 0);
@@ -624,10 +705,12 @@ function aiGetDir(s, idx, time) {
   if (dodge !== 0) return dodge;
   if (time > ai.cd) {
     const enemy = g.ships[1 - idx];
+    const miss = diff.miss || 0.6;
+    const pressure = diff.pressure || 0.6;
     const gOffset = (g.well.x - W / 2) * 0.3 * diff.aimBonus;
-    ai.tgt = enemy.x + gOffset + Phaser.Math.Between(-100 + diff.aimBonus * 20, 100 - diff.aimBonus * 20);
+    ai.tgt = enemy.x + gOffset + Phaser.Math.Between(Math.round(-120 * miss), Math.round(120 * miss));
     ai.tgt = Phaser.Math.Clamp(ai.tgt, 80, W - 80);
-    ai.cd = time + Phaser.Math.Between(300, 1000);
+    ai.cd = time + Phaser.Math.Between(Math.round(280 + (1 - pressure) * 650), Math.round(700 + (1 - pressure) * 900));
   }
   const d = ai.tgt - ship.x;
   if (Math.abs(d) < 10) return 0;
@@ -637,6 +720,8 @@ function aiGetVDir(s, idx, time) {
   const g = s.g, ai = g.ai[idx], ship = g.ships[idx];
   if (!ai) return 0;
   const diff = ai.diff || AI_DIFF.NORMAL;
+  const aggress = diff.pressure || 0.6;
+  const vSkill = diff.vSkill || 0.8;
   const fwd = idx === 0 ? 1 : -1;
   let panic = 0;
   for (const b of g.bullets) {
@@ -655,11 +740,11 @@ function aiGetVDir(s, idx, time) {
   }
   if (time > (ai.vCd || 0)) {
     const enemy = g.ships[1 - idx];
-    const advBase = ship.baseY + fwd * SHIP_VERT * 0.58;
+    const advBase = ship.baseY + fwd * SHIP_VERT * (0.45 + aggress * 0.2);
     const pressure = Phaser.Math.Clamp(Math.abs(enemy.x - ship.x) / 260, 0, 1);
-    const jitter = Phaser.Math.Between(-6, 6) * (2 - diff.aimBonus);
+    const jitter = Phaser.Math.Between(-18, 18) * Math.max(0.2, 1.2 - vSkill);
     ai.vTgt = advBase - fwd * (12 * pressure) + jitter;
-    ai.vCd = time + Phaser.Math.Between(260, 700);
+    ai.vCd = time + Phaser.Math.Between(Math.round(260 + (1 - aggress) * 480), Math.round(680 + (1 - aggress) * 850));
   }
   const minY = ship.baseY - 10, maxY = ship.baseY + SHIP_VERT * fwd;
   const tgtY = Phaser.Math.Clamp(ai.vTgt || ship.baseY, Math.min(minY, maxY), Math.max(minY, maxY));
@@ -676,8 +761,13 @@ function aiWantShoot(s, idx, time) {
   const pts = simTrajectory(ship.x, ship.y, 0, vy, g.well.x, g.well.y, g.well.mass, 25, 0.016);
   let willHit = false;
   for (const p of pts) { if (Math.abs(p.x - enemy.x) < 50 && Math.abs(p.y - enemy.y) < 40) { willHit = true; break; } }
-  if (willHit) return Math.random() < diff.shootChance;
-  return Math.random() < diff.shootChance * 0.15;
+  const pressure = diff.pressure || 0.6;
+  const vSkill = diff.vSkill || 0.8;
+  let chance = willHit ? diff.shootChance * (0.8 + pressure * 0.4) : diff.shootChance * (0.12 + pressure * 0.08);
+  const exposed = idx === 0 ? enemy.y > enemy.baseY + SHIP_VERT * 0.45 : enemy.y < enemy.baseY - SHIP_VERT * 0.45;
+  if (exposed) chance *= 1 + pressure * 0.6;
+  if (Math.random() < (1 - Math.min(1, vSkill)) * 0.08) return false;
+  return Math.random() < chance;
 }
 function aiWantDash(s, idx, time) {
   const g = s.g, ai = g.ai[idx], ship = g.ships[idx];
@@ -1186,13 +1276,19 @@ function showMatchEnd(s) {
   const st = g.stats;
   const acc0 = st.shots[0] > 0 ? Math.round((st.hits[0] / st.shots[0]) * 100) : 0;
   const acc1 = st.shots[1] > 0 ? Math.round((st.hits[1] / st.shots[1]) * 100) : 0;
+  const hiA = st.maxCombo[0] >= st.maxCombo[1] ? 'P1 COMBO x' + st.maxCombo[0] : 'P2 COMBO x' + st.maxCombo[1];
+  const hiB = st.orbits[0] >= st.orbits[1] ? 'P1 ORBITS ' + st.orbits[0] : 'P2 ORBITS ' + st.orbits[1];
+  const wGoals = g.goalDone[w].filter(Boolean).length;
   const statsTxt = `ACCURACY: ${acc0}% | ${acc1}%
 ORBIT SHOTS: ${st.orbits[0]} | ${st.orbits[1]}
-MAX COMBO: ${st.maxCombo[0]} | ${st.maxCombo[1]}`;
+MAX COMBO: ${st.maxCombo[0]} | ${st.maxCombo[1]}
+HIGHLIGHT: ${hiA} / ${hiB}
+WINNER GOALS: ${wGoals}/3  SCORE ${st.runScore[w]}`;
   s.ui.endScores.setText(statsTxt);
 }
 function updateMatchEnd(s, time) {
   const g = s.g, ne = g.nameEntry;
+  s.ui.endStatus.setAlpha(0.55 + 0.45 * Math.sin(time / 130));
   if (pressed(s, ['START1', 'START2'])) { showTitle(s); return; }
   if (pressed(s, ['P1_2', 'P2_2'])) { startMatch(s, g.mode || 1, time); return; }
   // Navigate grid
